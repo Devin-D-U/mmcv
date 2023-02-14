@@ -10,6 +10,7 @@ from mmcv.ops import (SparseConvTensor, SparseInverseConv3d, SparseSequential,
 if torch.__version__ == 'parrots':
     pytest.skip('not supported in parrots now', allow_module_level=True)
 
+from mmcv.utils import IS_CUDA_AVAILABLE, IS_MLU_AVAILABLE, IS_NPU_AVAILABLE
 
 def make_sparse_convmodule(in_channels,
                            out_channels,
@@ -76,21 +77,29 @@ def make_sparse_convmodule(in_channels,
     return layers
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason='requires CUDA support')
-def test_make_sparse_convmodule():
+@pytest.mark.parametrize('device', [
+    pytest.param(
+        'cuda',
+        marks=pytest.mark.skipif(
+            not IS_CUDA_AVAILABLE, reason='requires CUDA support')),
+    pytest.param(
+        'mlu',
+        marks=pytest.mark.skipif(
+            not IS_MLU_AVAILABLE, reason='requires MLU support'))
+])
+def test_make_sparse_convmodule(device):
     torch.cuda.empty_cache()
     voxel_features = torch.tensor([[6.56126, 0.9648336, -1.7339306, 0.315],
                                    [6.8162713, -2.480431, -1.3616394, 0.36],
                                    [11.643568, -4.744306, -1.3580885, 0.16],
                                    [23.482342, 6.5036807, 0.5806964, 0.35]],
                                   dtype=torch.float32,
-                                  device='cuda')  # n, point_features
+                                  device=device)  # n, point_features
     coordinates = torch.tensor(
         [[0, 12, 819, 131], [0, 16, 750, 136], [1, 16, 705, 232],
          [1, 35, 930, 469]],
         dtype=torch.int32,
-        device='cuda')  # n, 4(batch, ind_x, ind_y, ind_z)
+        device=device)  # n, 4(batch, ind_x, ind_y, ind_z)
 
     # test
     input_sp_tensor = SparseConvTensor(voxel_features, coordinates,
@@ -105,7 +114,7 @@ def test_make_sparse_convmodule():
         padding=0,
         conv_type='SubMConv3d',
         norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
-        order=('conv', 'norm', 'act')).cuda()
+        order=('conv', 'norm', 'act')).to(device)
     assert isinstance(sparse_block0[0], SubMConv3d)
     assert sparse_block0[0].in_channels == 4
     assert sparse_block0[0].out_channels == 16
@@ -127,7 +136,64 @@ def test_make_sparse_convmodule():
         padding=0,
         conv_type='SparseInverseConv3d',
         norm_cfg=dict(type='BN1d', eps=1e-3, momentum=0.01),
-        order=('norm', 'act', 'conv')).cuda()
+        order=('norm', 'act', 'conv')).to(device)
     assert isinstance(sparse_block1[0], torch.nn.BatchNorm1d)
     assert isinstance(sparse_block1[1], torch.nn.ReLU)
     assert isinstance(sparse_block1[2], SparseInverseConv3d)
+
+# test_make_sparse_convmodule('mlu')
+
+def test_indice_conv_bp():
+    import numpy as np
+    from mmcv.utils import ext_loader
+    ext_module = ext_loader.load_ext('_ext',['indice_conv_backward',
+                                        'get_indice_pairs_3d_forward'])
+
+    indice_pairs_num = [[[0,-1],
+                         [0,-1]],
+                        [[0,1],
+                         [0,1]],
+                        [[0,-1],
+                         [0,-1]]]
+    feature = torch.tensor(np.ones((10,10))).mlu().float()
+    filters = torch.tensor(np.ones((3,1,1,10,10))).mlu().float()
+    outgrad = torch.tensor(np.ones((10,10))).mlu().float()
+    indice_pairs = torch.tensor(indice_pairs_num).mlu().int()
+    indice_num = torch.tensor([1,2,1]).mlu().int()
+    inverse = 0
+    sub_m = 1
+
+    print(indice_num)
+    ingrad, filter_grad = ext_module.indice_conv_backward(
+                feature,
+                filters,
+                outgrad,
+                indice_pairs,
+                indice_num,
+                int(inverse),
+                int(sub_m))
+
+    indices = [[0,0,0,0],[1,1,1,1]]
+    indices_tensor =  torch.tensor(indices).mlu().int()
+    padding = [1,1,1]
+    stride = [1,1,1]
+    dilation = [1,1,1]
+    kernel_size = [3,3,3]
+    input_space = [8,8,8]
+    output_space = [8,8,8]
+    batch = 4
+    output_padding = [0,0,0]
+    transpose = 0
+    sub_m = 1
+    out_indice_mlu, indice_pairs_mlu, indice_num_mlu = ext_module.get_indice_pairs_3d_forward(
+                indices_tensor, batch, output_space, input_space, kernel_size, stride,
+                 padding, dilation, output_padding, int(sub_m), int(transpose))
+    print(out_indice_mlu)
+    print(indice_pairs_mlu)
+    print(indice_num_mlu)
+
+
+    
+    
+
+test_indice_conv_bp()   
